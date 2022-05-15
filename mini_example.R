@@ -35,10 +35,7 @@ dets <- read.csv("august-yaps.csv") %>%
 hydros <- read.csv("C:/Users/robert.lennox/Downloads/hydros.csv") %>% 
   dplyr::select(-1)
 temp <- read.csv("C:/Users/robert.lennox/OneDrive - NINA/Aurland/temp.csv") %>% 
-  as_tibble %>% 
-  mutate(dt=ymd_hms(Date.and.Time..UTC.)) %>% 
-  dplyr::rename(temp=Temperature..degC.) %>% 
-  dplyr::select(dt, Receiver, temp)
+  as_tibble
 
 # make the synchronization data frame: detections
 
@@ -260,9 +257,13 @@ track<-runYaps(
          ss_data_what="est", 
          ss_data=0, 
          bbox=NULL), 
-  silent=T, 
+  silent=F, 
   tmb_smartsearch=TRUE, 
   maxIter=5000)
+
+# false convergence.. not ideal
+
+# hey this does not look amazing, but we have gotten started at last
 
 aur+
   geom_path(data=dat %>% 
@@ -283,5 +284,51 @@ aur+
                as(., "Spatial") %>% 
                as_tibble,
              aes(coords.x1, coords.x2))
-  
-  
+
+## making YAPS fully operational
+# the purrr::rerun function allows us to run the YAPS process five times
+# we can extract the pseudo-AIC value and check the best fit, discard the rest
+
+## that does not work because one bad run ruins the bunch.. enter:
+# MAGIC YAPS
+
+magicYAPS<-function(x){tryCatch({runYaps(
+  getInp(hydros_yaps, 
+         toa, 
+         E_dist="Mixture", 
+         n_ss=5, 
+         pingType="rbi", 
+         sdInits=1, 
+         rbi_min=rbi_min, 
+         rbi_max=rbi_max, 
+         ss_data_what="est", 
+         ss_data=0, 
+         bbox=NULL), 
+  silent=F, 
+  tmb_smartsearch=TRUE, 
+  maxIter=5000)},
+  error=function(e){NA})}
+
+YAPS_list<-5 %>% purrr::rerun(., magicYAPS())
+
+aur+
+  geom_path(data=YAPS_list %>% 
+              purrr::map(purrr::pluck(8)) %>% 
+              purrr::map(as_tibble) %>% 
+              bind_rows(.id="id") %>% 
+              st_as_sf(., coords = c("x", "y"), crs = 32633) %>% 
+              sf::st_transform(., crs = 4326) %>% 
+              as(., "Spatial") %>% 
+              as_tibble,
+            aes(coords.x1, coords.x2, colour=id),
+            size=1.4)
+
+YAPS_list %>%  # the magic number
+  purrr::map(purrr::pluck(4)) %>% # get the AIC cols
+  purrr::map(purrr::pluck(1)) %>% # take the number
+  bind_cols() %>% # make a df
+  t() %>% # oops wrong order
+  as_tibble %>% # obv
+  dplyr::filter(V1==min(V1)) %>% # get the min val
+  as.numeric
+
