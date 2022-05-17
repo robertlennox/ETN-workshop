@@ -6,6 +6,7 @@ library(ggmap)
 library(rvest)
 library(sf)
 library(data.table)
+require(yaps)
 
 tr <- opq(bbox = 'Aurland Norway') %>%
   add_osm_feature(key = 'name') %>%
@@ -35,7 +36,8 @@ dets <- read.csv("august-yaps.csv") %>%
 hydros <- read.csv("C:/Users/robert.lennox/Downloads/hydros.csv") %>% 
   dplyr::select(-1)
 temp <- read.csv("C:/Users/robert.lennox/OneDrive - NINA/Aurland/temp.csv") %>% 
-  as_tibble
+  as_tibble %>% 
+  mutate(dt=ymd_hms(dt))
 
 # make the synchronization data frame: detections
 
@@ -213,6 +215,15 @@ dat %>%
   ggplot(aes(eposync-epo))+
   geom_histogram()
 
+toa %>% 
+  as_tibble %>% 
+  mutate(i=c(1:nrow(.))) %>% 
+  gather(key, value, -i) %>% 
+  dplyr::filter(!is.na(value)) %>% 
+  count(i) %>% 
+  ggplot(aes(n))+
+  geom_histogram()
+
 hydros_yaps <- data.table::data.table(sync_model$pl$TRUE_H)
 colnames(hydros_yaps) <- c('hx','hy','hz')
 
@@ -309,7 +320,7 @@ magicYAPS<-function(x){tryCatch({runYaps(
   maxIter=5000)},
   error=function(e){NA})}
 
-YAPS_list<-5 %>% purrr::rerun(., magicYAPS())
+YAPS_list<-20 %>% purrr::rerun(., magicYAPS())
 
 aur+
   geom_path(data=YAPS_list %>% 
@@ -321,14 +332,39 @@ aur+
               as(., "Spatial") %>% 
               as_tibble,
             aes(coords.x1, coords.x2, colour=id),
-            size=1.4)
+            size=1.4)+
+  scale_colour_manual(values=c("red", "orange", "yellow"))+
+  theme(legend.position="top") 
 
-YAPS_list %>%  # the magic number
+
+## now let us see quantitatively what is the best track
+
+# try my hacky code to get out the AIC* values for each YAPS run
+
+fit<-YAPS_list %>%  # the magic number
   purrr::map(purrr::pluck(4)) %>% # get the AIC cols
   purrr::map(purrr::pluck(1)) %>% # take the number
   bind_cols() %>% # make a df
   t() %>% # oops wrong order
-  as_tibble %>% # obv
-  dplyr::filter(V1==min(V1)) %>% # get the min val
-  as.numeric
+  as_tibble %>% 
+  mutate(id=as.character(c(1, 3, 4))) %>% 
+  dplyr::rename(AIC=V1)
+
+aur+
+  geom_path(data=YAPS_list %>% 
+              purrr::map(purrr::pluck(8)) %>% 
+              purrr::map(as_tibble) %>% 
+              bind_rows(.id="id") %>% 
+              st_as_sf(., coords = c("x", "y"), crs = 32633) %>% 
+              sf::st_transform(., crs = 4326) %>% 
+              as(., "Spatial") %>% 
+              as_tibble %>% 
+              left_join(fit),
+            aes(coords.x1, coords.x2, colour=AIC %>% round %>% factor),
+            size=1.4)+
+  scale_colour_manual(values=c("red", "orange", "yellow"))+
+  theme(legend.position="top") +
+  labs(colour="AIC") # well.. that is discouraging, the best fit is obviously terrible
+
+
 
