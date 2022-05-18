@@ -8,6 +8,9 @@ library(sf)
 library(data.table)
 require(yaps)
 
+# download data
+# https://drive.google.com/drive/folders/1yiq68yp60Re8y4aIziXd3tsKsTG_1LWm?usp=sharing
+
 tr <- opq(bbox = 'Aurland Norway') %>%
   add_osm_feature(key = 'name') %>%
   osmdata_sf()
@@ -29,7 +32,7 @@ aur<-tr$osm_polygons %>%
   coord_sf(xlim=c(7.26, 7.31),
            ylim=c(60.862, 60.88))
 setwd("C:/Users/robert.lennox/OneDrive - NINA/Aurland")
-dets <- read.csv("august-yaps.csv") %>% 
+dets <- read.csv("august-yaps.csv") %>% # use the data I shared
   as_tibble %>% 
   dplyr::select(-1) %>% 
   mutate(dt=ymd_hms(dt))
@@ -110,15 +113,17 @@ syncl<-list(hydros=hydros %>% setDT, # learn data.table
             detections=detections %>% 
               setDT)
 
-max_epo_diff <- 250
-min_hydros <- 3
-time_keeper_idx <- 6
+max_epo_diff <- 200 # depends on burst interval of syncs... it is 600 secs
+# trick is to align detection of each ping correctly
+# should never be >50% of sync burst interval.. so never >300s
+min_hydros <- 3 # toa matrix... if it doesn't work move to 2
+time_keeper_idx <- 9
 fixed_hydros_idx <- c(1:nrow(hydros))
-n_offset_day <- 4
-n_ss_day <- 2
-keep_rate<-1
+n_offset_day <- 1 # with thelma or vemco, one usually enough.. maybe 2
+n_ss_day <- 2 # ignored if not estimated
+keep_rate<-1 # keep all the data.. might be ok with smaller dataset
+# below one is a proportion of the data to keep
 excl_self_detect = FALSE # I typically exclude own detections of sync tags, but since we only have two, we need them...
-fixed_hydros_idx <- 1:11 # assume all hydros are at correct and known positions...
 ss_data_what <- 'data'
 ss_data<-temp %>% 
   dplyr::rename(ts=dt) %>% 
@@ -138,16 +143,26 @@ inp_sync <- getInpSync(syncl,
                        silent_check=F, 
                        ss_data_what=ss_data_what)
 
+getSyncCoverage(inp_sync, plot=TRUE) # helps find timekeeper :)
+
 sync_model_0 <- sync_model_1 <- sync_model_2 <- sync_model_3 <- sync_model_4 <- NULL
 sync_model_0 <- getSyncModel(inp_sync, silent=TRUE, max_iter=1000, tmb_smartsearch = TRUE)
 sync_model_1 <- fineTuneSyncModel(sync_model_0, eps_threshold=1E3, silent=TRUE)
 sync_model_2 <- fineTuneSyncModel(sync_model_1, eps_threshold=1E2, silent=TRUE)
 sync_model_3 <- fineTuneSyncModel(sync_model_2, eps_threshold=1E1, silent=TRUE)
+sync_model_4 <- fineTuneSyncModel(sync_model_3, eps_threshold=1E1, silent=TRUE)
+sync_model_5 <- fineTuneSyncModel(sync_model_4, eps_threshold=1E1, silent=TRUE)
+
 
 setwd("C:/Users/robert.lennox/OneDrive - NINA/Aurland")
 #sync_model<-readRDS("sync_Aurland2.rds")
 
-sync_model<-sync_model_3
+sync_model<-sync_model_5
+
+sync_model$eps_long %>% 
+  as_tibble %>% 
+  arrange(desc(E)) # check for outliers, rerun sync model with eps_threshold=1E1
+# until the outliers are toast
 
 sync_model$eps_long %>% 
   as_tibble %>%
@@ -157,10 +172,13 @@ sync_model$eps_long %>%
   labs(fill="Receiver")+
   theme(legend.position="top")
 
+plotSyncModelResids(sync_model)+
+  theme_classic()
+
 sync_model$eps_long %>% 
   as_tibble %>% 
   ggplot(aes(factor(hydro_idx), E, fill=factor(sync_tag_idx)))+
-  geom_violin()+
+  geom_boxplot()+
   theme_classic()+
   labs(fill="Sync Tag")+
   theme(legend.position="top")
@@ -204,25 +222,28 @@ fish_detections<-
 
 dat <- applySync(toa=fish_detections %>%
                    dplyr::filter(yday(ts)==218) %>% 
-                   dplyr::filter(tag==4712) %>% # only works with one tag at a time!
+                   dplyr::filter(tag==4712) %>% 
+                   slice(1:500) %>% # only works with one tag at a time!
                    setDT, # never forget: Henrik <3 data.table
                  hydros=hydros, 
                  sync_model=sync_model)
+
+sync_model$pl$OFFSET %>% 
+  t() %>% 
+  matplot()
 
 dat %>% 
   as_tibble %>% 
   dplyr::select(ts, tag, serial, epo, eposync) %>% 
   ggplot(aes(eposync-epo))+
-  geom_histogram()
+  geom_histogram(fill="black")+
+  theme_classic()
 
-toa %>% 
-  as_tibble %>% 
-  mutate(i=c(1:nrow(.))) %>% 
-  gather(key, value, -i) %>% 
-  dplyr::filter(!is.na(value)) %>% 
-  count(i) %>% 
-  ggplot(aes(n))+
-  geom_histogram()
+matplot(toa[,7]-toa)
+
+
+apply(toa,1,function(k) sum(!is.na(k))) %>% 
+  plot()
 
 hydros_yaps <- data.table::data.table(sync_model$pl$TRUE_H)
 colnames(hydros_yaps) <- c('hx','hy','hz')
@@ -259,17 +280,17 @@ aes(coords.x1, coords.x2, size=value-1633509498), colour="red")+
 track<-runYaps(
   getInp(hydros_yaps, 
          toa, 
-         E_dist="Mixture", 
-         n_ss=5, 
+         E_dist="Mixture", # could be pure Gaussian or pure t.. dont mess
+         n_ss=5,
          pingType="rbi", 
          sdInits=1, 
          rbi_min=rbi_min, 
          rbi_max=rbi_max, 
          ss_data_what="est", 
          ss_data=0, 
-         bbox=NULL), 
+         bbox=100), # estimated positions cannot be 100m beyond
   silent=F, 
-  tmb_smartsearch=TRUE, 
+  tmb_smartsearch=T, 
   maxIter=5000)
 
 # false convergence.. not ideal
@@ -303,7 +324,8 @@ aur+
 ## that does not work because one bad run ruins the bunch.. enter:
 # MAGIC YAPS
 
-magicYAPS<-function(x){tryCatch({runYaps(
+magicYAPS<-function(x){tryCatch({
+  runYaps(
   getInp(hydros_yaps, 
          toa, 
          E_dist="Mixture", 
@@ -314,13 +336,32 @@ magicYAPS<-function(x){tryCatch({runYaps(
          rbi_max=rbi_max, 
          ss_data_what="est", 
          ss_data=0, 
-         bbox=NULL), 
+         bbox=100), 
   silent=F, 
   tmb_smartsearch=TRUE, 
   maxIter=5000)},
   error=function(e){NA})}
 
-YAPS_list<-20 %>% purrr::rerun(., magicYAPS())
+YAPS_list<-5 %>% purrr::rerun(., magicYAPS())
+
+YAPS_list %>% 
+  purrr::map(purrr::pluck(8)) %>% 
+  purrr::map(as_tibble) %>% 
+  bind_rows(.id="id") 
+
+
+YAPS_list %>% 
+  purrr::map(purrr::pluck(8)) %>% 
+  purrr::map(as_tibble) %>% 
+  bind_rows(.id="id") %>% 
+  ggplot(aes(top, x, colour=id))+
+  geom_point()+
+  theme_bw()
+
+YAPS_list %>% 
+  pluck(2) %>% 
+  pluck(1) %>% 
+  pluck(6)
 
 aur+
   geom_path(data=YAPS_list %>% 
